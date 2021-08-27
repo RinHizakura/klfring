@@ -14,6 +14,52 @@ static struct cdev klfring_cdev;
 static struct class *klfring_class = NULL;
 static lfring_t *rb;
 
+#define EXPECT(exp)       \
+    {                     \
+        if (!(exp))       \
+            return false; \
+    }
+
+static bool test_ringbuffer(uint32_t flags)
+{
+    void *vec[4];
+    uint32_t ret;
+    uint32_t idx;
+
+    lfring_t *rb = lfring_alloc(2, flags);
+    EXPECT(rb != NULL);
+
+    ret = lfring_dequeue(rb, vec, 1, &idx);
+    EXPECT(ret == 0);
+    ret = lfring_enqueue(rb, (void *[]){(void *) 1}, 1);
+    EXPECT(ret == 1);
+
+    ret = lfring_dequeue(rb, vec, 1, &idx);
+    EXPECT(ret == 1);
+    EXPECT(idx == 0);
+    EXPECT(vec[0] == (void *) 1);
+
+    ret = lfring_dequeue(rb, vec, 1, &idx);
+    EXPECT(ret == 0);
+
+    ret = lfring_enqueue(rb, (void *[]){(void *) 2, (void *) 3, (void *) 4}, 3);
+    EXPECT(ret == 2);
+
+    ret = lfring_dequeue(rb, vec, 1, &idx);
+    EXPECT(ret == 1);
+    EXPECT(idx == 1);
+    EXPECT(vec[0] == (void *) 2);
+
+    ret = lfring_dequeue(rb, vec, 4, &idx);
+    EXPECT(ret == 1);
+    EXPECT(idx == 2);
+    EXPECT(vec[0] == (void *) 3);
+
+    lfring_free(rb);
+    return true;
+}
+
+
 static int klfring_open(struct inode *inode, struct file *file)
 {
     return 0;
@@ -59,6 +105,20 @@ static int __init klfring_init(void)
         goto error_cdev_del;
 
     printk(KERN_INFO DEVICE_NAME ": loaded\n");
+
+    printk("testing SPMC lock-free ring\n");
+    if (!test_ringbuffer(LFRING_FLAG_SP | LFRING_FLAG_MC)) {
+        printk(KERN_INFO "Failed to pass the SPMC buffer test!");
+        return -EIO;
+    }
+
+    printk("testing SPSC lock-free ring\n");
+    if (!test_ringbuffer(LFRING_FLAG_SP | LFRING_FLAG_SC)) {
+        printk(KERN_INFO "Failed to pass the SPSC buffer test!");
+        return -EIO;
+    }
+
+    printk(KERN_INFO "Success to pass the buffer test!");
     return 0;
 
 error_cdev_del:

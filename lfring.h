@@ -14,5 +14,10 @@ typedef struct lfring lfring_t;
 
 lfring_t *lfring_alloc(uint32_t n_elems, uint32_t flags);
 void lfring_free(lfring_t *lfr);
+uint32_t lfring_enqueue(lfring_t *lfr, void *const *elems, uint32_t n_elems);
+uint32_t lfring_dequeue(lfring_t *lfr,
+                        void **elems,
+                        uint32_t n_elems,
+                        uint32_t *index);
 
 #endif
