@@ -2,13 +2,14 @@
 #include <linux/slab.h>
 
 #include "lfring.h"
-
 #define CACHE_LINE 64 /* FIXME: should be configurable */
 
 #define SUPPORTED_FLAGS \
     (LFRING_FLAG_SP | LFRING_FLAG_MP | LFRING_FLAG_SC | LFRING_FLAG_MC)
 
-typedef atomic_t ringidx_t;
+typedef atomic_long_t ringidx_t;
+typedef unsigned long __ringidx_t;
+
 struct element {
     void *ptr;
     ringidx_t idx;
@@ -45,13 +46,13 @@ lfring_t *lfring_alloc(uint32_t n_elems, uint32_t flags)
     if (!lfr)
         return NULL;
 
-    atomic_set(&lfr->head, 0);
-    atomic_set(&lfr->tail, 0);
+    atomic_long_set(&lfr->head, 0);
+    atomic_long_set(&lfr->tail, 0);
     lfr->mask = ringsz - 1;
     lfr->flags = flags;
     for (i = 0; i < ringsz; i++) {
         lfr->ring[i].ptr = NULL;
-        atomic_set(&lfr->ring[i].idx, i - ringsz);
+        atomic_long_set(&lfr->ring[i].idx, i - ringsz);
     }
 
     return lfr;
@@ -66,45 +67,45 @@ void lfring_free(lfring_t *lfr)
 }
 
 /* True if 'a' is before 'b' ('a' < 'b') in serial number arithmetic */
-static inline bool before(int a, int b)
+static inline bool before(__ringidx_t a, __ringidx_t b)
 {
-    return (int) (a - b) < 0;
+    return (long) (a - b) < 0;
 }
 
 
-static inline int cond_update(ringidx_t *loc, int neu)
+static inline __ringidx_t cond_update(ringidx_t *loc, __ringidx_t neu)
 {
-    int old = atomic_read(loc);
+    __ringidx_t old = atomic_long_read(loc);
     do {
         if (before(neu, old)) /* neu < old */
             return old;
         /* if neu > old, need to update *loc */
-    } while (!atomic_try_cmpxchg(loc, &old, neu));
+    } while (!atomic_long_try_cmpxchg(loc, &old, neu));
     return neu;
 }
 
 uint32_t lfring_enqueue(lfring_t *lfr, void *const *elems, uint32_t n_elems)
 {
-    int actual = 0;
-    unsigned int mask = lfr->mask;
-    unsigned int size = mask + 1;
-    unsigned int tail = atomic_read(&lfr->tail);
+    long actual = 0;
+    __ringidx_t mask = lfr->mask;
+    __ringidx_t size = mask + 1;
+    __ringidx_t tail = atomic_long_read(&lfr->tail);
 
     uint32_t i;
 
     if (lfr->flags & LFRING_FLAG_SP) {
-        uint32_t head = atomic_read(&lfr->head);
+        uint32_t head = atomic_long_read(&lfr->head);
 
-        actual = min((int) (head + size - tail), (int) n_elems);
+        actual = min((long) (head + size - tail), (long) n_elems);
         if (actual <= 0)
             return 0;
 
         for (i = 0; i < (uint32_t) actual; i++) {
             lfr->ring[tail & mask].ptr = *elems++;
-            atomic_set(&lfr->ring[tail & mask].idx, tail);
+            atomic_long_set(&lfr->ring[tail & mask].idx, tail);
             tail++;
         }
-        atomic_set(&lfr->tail, tail);
+        atomic_long_set(&lfr->tail, tail);
         return (uint32_t) actual;
     }
 
@@ -112,12 +113,14 @@ uint32_t lfring_enqueue(lfring_t *lfr, void *const *elems, uint32_t n_elems)
     return 0;
 }
 
-static inline int find_tail(lfring_t *lfr, int head, int tail)
+static inline __ringidx_t find_tail(lfring_t *lfr,
+                                    __ringidx_t head,
+                                    __ringidx_t tail)
 {
-    unsigned int mask, size;
+    __ringidx_t mask, size;
 
     if (lfr->flags & LFRING_FLAG_SP) /* single-producer enqueue */
-        return atomic_read(&lfr->tail);
+        return atomic_long_read(&lfr->tail);
 
     /* Multi-producer enqueue.
      * Scan ring for new elements that have been written but not released.
@@ -126,7 +129,7 @@ static inline int find_tail(lfring_t *lfr, int head, int tail)
     size = mask + 1;
 
     while (before(tail, head + size) &&
-           atomic_read(&lfr->ring[tail & mask].idx) == tail)
+           atomic_long_read(&lfr->ring[tail & mask].idx) == tail)
         tail++;
     tail = cond_update(&lfr->tail, tail);
     return tail;
@@ -137,18 +140,18 @@ uint32_t lfring_dequeue(lfring_t *lfr,
                         uint32_t n_elems,
                         uint32_t *index)
 {
-    int actual;
-    unsigned int mask = lfr->mask;
-    unsigned int head = atomic_read(&lfr->head);
-    unsigned int tail = atomic_read(&lfr->tail);
+    long actual;
+    __ringidx_t mask = lfr->mask;
+    __ringidx_t head = atomic_long_read(&lfr->head);
+    __ringidx_t tail = atomic_long_read(&lfr->tail);
     uint32_t i;
 
     do {
-        actual = min((int) (tail - head), (int) n_elems);
+        actual = min((long) (tail - head), (long) n_elems);
         if (unlikely(actual <= 0)) {
             /* Ring buffer is empty, scan for new but unreleased elements */
             tail = find_tail(lfr, head, tail);
-            actual = min((int) (tail - head), (int) n_elems);
+            actual = min((long) (tail - head), (long) n_elems);
             if (actual <= 0)
                 return 0;
         }
@@ -156,12 +159,12 @@ uint32_t lfring_dequeue(lfring_t *lfr,
             elems[i] = lfr->ring[(head + i) & mask].ptr;
         // smp_fence(LoadStore);                        // Order loads only
         if (lfr->flags & LFRING_FLAG_SC) { /* Single-consumer */
-            atomic_set(&lfr->head, head + actual);
+            atomic_long_set(&lfr->head, head + actual);
             break;
         }
 
         /* else: lock-free multi-consumer */
-    } while (!atomic_try_cmpxchg(&lfr->head, &head, head + actual));
+    } while (!atomic_long_try_cmpxchg(&lfr->head, &head, head + actual));
 
     *index = (uint32_t) head;
     return (uint32_t) actual;
