@@ -157,7 +157,9 @@ uint32_t lfring_dequeue(lfring_t *lfr,
         }
         for (i = 0; i < (uint32_t) actual; i++)
             elems[i] = lfr->ring[(head + i) & mask].ptr;
-        // smp_fence(LoadStore);                        // Order loads only
+
+        barrier();
+
         if (lfr->flags & LFRING_FLAG_SC) { /* Single-consumer */
             atomic_long_set(&lfr->head, head + actual);
             break;
