@@ -1,6 +1,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 
+#include "common.h"
 #include "lfring.h"
 #define CACHE_LINE 64 /* FIXME: should be configurable */
 
@@ -84,12 +85,24 @@ static inline __ringidx_t cond_update(ringidx_t *loc, __ringidx_t neu)
     return neu;
 }
 
+static inline __ringidx_t cond_reload(__ringidx_t idx, const ringidx_t *loc)
+{
+    __ringidx_t fresh = atomic_long_read(loc);
+    if (before(idx, fresh)) { /* fresh is after idx, use this instead */
+        idx = fresh;
+    } else { /* Continue with next slot */
+        idx++;
+    }
+    return idx;
+}
+
 uint32_t lfring_enqueue(lfring_t *lfr, void *const *elems, uint32_t n_elems)
 {
     long actual = 0;
     __ringidx_t mask = lfr->mask;
     __ringidx_t size = mask + 1;
     __ringidx_t tail = atomic_long_read(&lfr->tail);
+    __ringidx_t old_e_idx;
 
     uint32_t i;
 
@@ -110,7 +123,43 @@ uint32_t lfring_enqueue(lfring_t *lfr, void *const *elems, uint32_t n_elems)
     }
 
     /* TODO: support lock-free multi-producer */
-    return 0;
+restart:
+    while ((uint32_t) actual < n_elems &&
+           before(tail, atomic_long_read(&lfr->head) + size)) {
+        union {
+            struct element e;
+            __int128 pp;
+        } old, neu;
+        void *elem = elems[actual];
+        struct element *slot = &lfr->ring[tail & mask];
+        old.e.ptr = slot->ptr;  // FIXME: do we have to atomically load this?
+        atomic_long_set(&(old.e.idx), atomic_long_read(&slot->idx));
+        do {
+            old_e_idx = atomic_long_read(&(old.e.idx));
+            if (unlikely(old_e_idx != tail - size)) {
+                if (old_e_idx != tail) {
+                    /* We are far behind. Restart with fresh index */
+                    tail = cond_reload(tail, &lfr->tail);
+                    goto restart;
+                }
+                /* slot already enqueued */
+                tail++; /* Try next slot */
+                goto restart;
+            }
+
+            /* Found slot that was used one lap back.
+             * Try to enqueue next element.
+             */
+            neu.e.ptr = elem;
+            atomic_long_set(&(neu.e.idx), tail); /* Set idx on enqueue */
+        } while (!lf_compare_exchange((__int128 *) slot, &old.pp, neu.pp));
+
+        /* Enqueue succeeded */
+        actual++;
+        tail++; /* Continue with next slot */
+    }
+    (void) cond_update(&lfr->tail, tail);
+    return (uint32_t) actual;
 }
 
 static inline __ringidx_t find_tail(lfring_t *lfr,

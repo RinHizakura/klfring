@@ -106,15 +106,23 @@ static int __init klfring_init(void)
 
     printk(KERN_INFO DEVICE_NAME ": loaded\n");
 
-    printk("testing SPMC lock-free ring\n");
+    if (!test_ringbuffer(LFRING_FLAG_SP | LFRING_FLAG_SC)) {
+        printk(KERN_INFO "Failed to pass the SPSC buffer test!");
+        return -EIO;
+    }
+
     if (!test_ringbuffer(LFRING_FLAG_SP | LFRING_FLAG_MC)) {
         printk(KERN_INFO "Failed to pass the SPMC buffer test!");
         return -EIO;
     }
 
-    printk("testing SPSC lock-free ring\n");
-    if (!test_ringbuffer(LFRING_FLAG_SP | LFRING_FLAG_SC)) {
-        printk(KERN_INFO "Failed to pass the SPSC buffer test!");
+    if (!test_ringbuffer(LFRING_FLAG_MP | LFRING_FLAG_SC)) {
+        printk(KERN_INFO "Failed to pass the MPSC buffer test!");
+        return -EIO;
+    }
+
+    if (!test_ringbuffer(LFRING_FLAG_MP | LFRING_FLAG_MC)) {
+        printk(KERN_INFO "Failed to pass the MPMC buffer test!");
         return -EIO;
     }
 
