@@ -122,7 +122,6 @@ uint32_t lfring_enqueue(lfring_t *lfr, void *const *elems, uint32_t n_elems)
         return (uint32_t) actual;
     }
 
-    /* TODO: support lock-free multi-producer */
 restart:
     while ((uint32_t) actual < n_elems &&
            before(tail, atomic_long_read(&lfr->head) + size)) {
